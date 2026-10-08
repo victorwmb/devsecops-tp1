@@ -76,3 +76,15 @@ Architecture : une API Flask (`api-python`) et une base PostgreSQL (`db`).
 Capture des tests `/health` et `/dbtest` sur la composition lancée en local :
 
 ![Tests /health et /dbtest](2026-10-08_13-21.png)
+
+Trivy sur l'image publiée (`ghcr.io/victorwmb/devsecops-tp1:1.0.0`) : 0 vulnérabilité, code de retour 0.
+
+![Trivy image publiée](2026-10-08_15-15.png)
+
+Trivy sur `requirements.txt` : 0 vulnérabilité, code de retour 0.
+
+![Trivy requirements.txt](2026-10-08_15-15_1.png)
+
+Trivy sur l'image d'origine (avant) : 3 vulnérabilités HIGH corrigibles, code de retour 1 (bloqué).
+
+![Trivy image d'origine](2026-10-08_15-15_2.png)
