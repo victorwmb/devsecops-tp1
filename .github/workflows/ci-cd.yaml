@@ -1,0 +1,194 @@
+name: CI/CD DevSecOps
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: ["main"]
+
+permissions: {}
+
+env:
+  IMAGE: devsecops-tp1-api:local
+  HADOLINT_IMAGE: hadolint/hadolint:v2.12.0@sha256:30a8fd2e785ab6176eed53f74769e04f125afb2f74a6c52aef7d463583b6d45e
+  DIVE_IMAGE: wagoodman/dive:v0.13.1@sha256:f1886e6c32c094fc41a623c1989f5cb3e48aa766da5f0be233f911fc1d85ce10
+  TRIVY_IMAGE: aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+
+jobs:
+  flake8:
+    name: 1. Qualité applicative (Flake8)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Installation de Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.14"
+
+      - name: Installation de Flake8
+        run: pip install --no-cache-dir flake8==7.4.1
+
+      - name: Audit Flake8 (fichier de configuration .flake8)
+        run: flake8 --config .flake8 .
+
+  hadolint:
+    name: 2. Analyse statique conteneur (Hadolint)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Audit Hadolint (.hadolint.yaml)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" -w /work "$HADOLINT_IMAGE" \
+            hadolint --config .hadolint.yaml Dockerfile
+
+  build:
+    name: 3. Build BuildKit et métrologie des couches (Dive)
+    needs: [flake8, hadolint]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Build de l'image via BuildKit
+        run: |
+          DOCKER_BUILDKIT=1 docker build -t "$IMAGE" .
+          docker save "$IMAGE" -o "$RUNNER_TEMP/image.tar"
+
+      - name: Dive en mode CI (efficience minimale 80 %)
+        run: |
+          docker run --rm -e CI=true -v "$RUNNER_TEMP:/img" "$DIVE_IMAGE" \
+            --ci --lowestEfficiency=0.8 --source docker-archive /img/image.tar
+
+      - name: Archivage de l'image pour les jobs suivants
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: image
+          path: ${{ runner.temp }}/image.tar
+          retention-days: 1
+
+  security:
+    name: 4. Sécurité supply chain (Trivy)
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Récupération de l'image
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: image
+          path: ${{ runner.temp }}
+
+      - name: Trivy - image produite (HIGH/CRITICAL corrigibles = échec)
+        run: |
+          docker run --rm -v "$RUNNER_TEMP:/img" "$TRIVY_IMAGE" \
+            image --input /img/image.tar --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1
+
+      - name: Trivy - dépendances applicatives (requirements.txt)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" -w /work "$TRIVY_IMAGE" \
+            fs --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 requirements.txt
+
+  integration:
+    name: 5. Intégration dynamique et smoke test
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Récupération de l'image
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: image
+          path: ${{ runner.temp }}
+
+      - name: Chargement de l'image
+        run: docker load -i "$RUNNER_TEMP/image.tar"
+
+      - name: Lancement de la composition (attente de l'état sain, timeout 120 s)
+        run: |
+          docker compose up -d --no-build --wait --wait-timeout 120
+          docker compose ps
+
+      - name: Test de santé de l'API (/health)
+        run: |
+          RESPONSE=$(curl -fsS http://localhost:5000/health)
+          echo "$RESPONSE"
+          echo "$RESPONSE" | grep -q '"status":"ok"'
+
+      - name: Test de connexion à la base de données (/dbtest)
+        run: |
+          RESPONSE=$(curl -fsS http://localhost:5000/dbtest)
+          echo "$RESPONSE"
+          echo "$RESPONSE" | grep -q '"db_connection":"successful"'
+
+      - name: Tests pytest (dans le réseau de la composition)
+        run: |
+          docker compose run --rm --no-deps \
+            -v "${{ github.workspace }}/test_app.py:/app/test_app.py:ro" \
+            --entrypoint python api-python -m pytest -v -p no:cacheprovider test_app.py
+
+      - name: Arrêt et purge des ressources
+        if: always()
+        run: docker compose down --volumes --remove-orphans
+
+  release:
+    name: 6. Distribution sécurisée (GHCR)
+    needs: [flake8, hadolint, build, security, integration]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Récupération de l'image validée
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: image
+          path: ${{ runner.temp }}
+
+      - name: Chargement de l'image
+        run: docker load -i "$RUNNER_TEMP/image.tar"
+
+      - name: Calcul des tags SemVer
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+
+      - name: Connexion à GHCR (jeton natif du workflow)
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publication sur ghcr.io
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          for TAG in $TAGS; do
+            docker tag "$IMAGE" "$TAG"
+            docker push "$TAG"
+          done
