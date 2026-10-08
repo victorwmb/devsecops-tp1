@@ -69,4 +69,4 @@ Architecture : une API Flask (`api-python`) et une base PostgreSQL (`db`).
 | Compose | api et db `healthy` |
 | /health, /dbtest | `{"status":"ok"}`, `{"db_connection":"successful"}` |
 | pytest | 3 passed |
-| Publication GHCR | *lien du run à ajouter* |
+| Publication GHCR | https://github.com/victorwmb/devsecops-tp1/actions/runs/37770566165 |
