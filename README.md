@@ -8,6 +8,8 @@ Architecture : une API Flask (`api-python`) et une base PostgreSQL (`db`).
 - L'API est reliée à `backend` et à `frontend` (port 5000).
 - Le pipeline GitHub Actions valide le code, l'image et la composition, puis publie l'image sur GHCR.
 
+**Organisation du binôme** : nous avons travaillé en pair programming, à deux sur le même poste (d'où les commits depuis le compte de Victor). L'un tapait pendant que l'autre relisait et proposait des idées, et nous échangions régulièrement les rôles. Nous avons commencé par lire le sujet et les cours ensemble, puis nous avons réfléchi à deux à chaque choix avant de le mettre en place. À chaque étape, nous avons testé ensemble que tout fonctionnait.
+
 ## 1. Liens GHCR
 
 - Package : https://github.com/victorwmb/devsecops-tp1/pkgs/container/devsecops-tp1
