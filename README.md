@@ -10,8 +10,8 @@ Architecture : une API Flask (`api-python`) et une base PostgreSQL (`db`).
 
 ## 1. Liens GHCR
 
-- Package : https://github.com/OWNER/devsecops-tp1/pkgs/container/devsecops-tp1
-- Commande : `docker pull ghcr.io/OWNER/devsecops-tp1:1.0.0`
+- Package : https://github.com/victorwmb/devsecops-tp1/pkgs/container/devsecops-tp1
+- Commande : `docker pull ghcr.io/victorwmb/devsecops-tp1:1.0.0`
 
 ## 2. Avant / Après
 
