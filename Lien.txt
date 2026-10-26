@@ -1,0 +1,8 @@
+Bonjour madame,
+
+J'espère que vous allez bien.
+
+Je vous partage le lien vers notre dépôt:
+https://github.com/victorwmb/devsecops-tp1
+
+Vous y trouverez toutes les informations nécessaires ainsi que les explications détaillées directement dans le README.

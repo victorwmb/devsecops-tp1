@@ -8,7 +8,14 @@ DB_HOST = os.getenv("DB_HOST", "db")
 DB_PORT = os.getenv("DB_PORT", "5432")
 DB_NAME = os.getenv("DB_NAME", "testdb")
 DB_USER = os.getenv("DB_USER", "testuser")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "testpass")
+# Le mot de passe est lu dans le secret monté par Docker : il n'est ni écrit dans
+# le code, ni transmis par une variable d'environnement.
+DB_PASSWORD_FILE = os.getenv("DB_PASSWORD_FILE", "/run/secrets/db_password")
+
+
+def read_db_password():
+    with open(DB_PASSWORD_FILE, encoding="utf-8") as secret:
+        return secret.read().strip()
 
 
 @app.route("/health")
@@ -27,7 +34,7 @@ def get_db_connection():
         port=DB_PORT,
         dbname=DB_NAME,
         user=DB_USER,
-        password=DB_PASSWORD
+        password=read_db_password()
     )
     return conn
 

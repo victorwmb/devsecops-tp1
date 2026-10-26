@@ -98,6 +98,13 @@ jobs:
           docker run --rm -v "$RUNNER_TEMP:/img" "$TRIVY_IMAGE" \
             image --input /img/image.tar --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1
 
+      - name: Trivy - image de la base de données (digest de docker-compose.yml)
+        run: |
+          DB_IMAGE=$(grep -oE 'cgr\.dev/chainguard/postgres@sha256:[0-9a-f]{64}' docker-compose.yml)
+          echo "Image scannée : $DB_IMAGE"
+          docker run --rm "$TRIVY_IMAGE" \
+            image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$DB_IMAGE"
+
       - name: Trivy - dépendances applicatives (requirements.txt)
         run: |
           docker run --rm -v "${{ github.workspace }}:/work" -w /work "$TRIVY_IMAGE" \
@@ -122,10 +129,54 @@ jobs:
       - name: Chargement de l'image
         run: docker load -i "$RUNNER_TEMP/image.tar"
 
+      - name: Génération d'un secret de base de données éphémère
+        run: |
+          # Mot de passe aléatoire propre à cette exécution : aucun secret statique dans le dépôt
+          mkdir -p secrets
+          openssl rand -hex 32 | tr -d '\r\n' > secrets/db_password.txt
+          echo "::add-mask::$(cat secrets/db_password.txt)"
+          # Lisible par les comptes non privilégiés des conteneurs (uid 70 et 65532)
+          chmod 0444 secrets/db_password.txt
+
+      - name: Contrôle de la composition (aucun secret en clair)
+        run: |
+          LEAKS=$(docker compose config --format json | jq -r '
+            .services | to_entries[] | .key as $svc
+            | (.value.environment // {}) | to_entries[]
+            | select(.key | test("PASS|SECRET|TOKEN"; "i"))
+            | select(.key | endswith("_FILE") | not)
+            | "\($svc).\(.key)"')
+          if [ -n "$LEAKS" ]; then
+            echo "::error::Secret transmis en variable d'environnement : $LEAKS"
+            exit 1
+          fi
+          echo "Aucun secret en clair : seuls des chemins *_FILE vers /run/secrets sont déclarés"
+
       - name: Lancement de la composition (attente de l'état sain, timeout 120 s)
         run: |
           docker compose up -d --no-build --wait --wait-timeout 120
           docker compose ps
+
+      - name: Contrôle du durcissement des conteneurs
+        run: |
+          FAIL=0
+          for CID in $(docker compose ps -q); do
+            NAME=$(docker inspect -f '{{.Name}}' "$CID")
+            USER_ID=$(docker inspect -f '{{.Config.User}}' "$CID")
+            READONLY=$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$CID")
+            CAPDROP=$(docker inspect -f '{{.HostConfig.CapDrop}}' "$CID")
+            SECOPT=$(docker inspect -f '{{.HostConfig.SecurityOpt}}' "$CID")
+            ENVS=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$CID")
+            echo "$NAME user=$USER_ID readonly=$READONLY capdrop=$CAPDROP secopt=$SECOPT"
+            case "${USER_ID%%:*}" in ""|0|root) echo "::error::$NAME s'exécute en root"; FAIL=1 ;; esac
+            [ "$READONLY" = "true" ] || { echo "::error::$NAME : système de fichiers inscriptible"; FAIL=1; }
+            [[ "$CAPDROP" == *ALL* ]] || { echo "::error::$NAME : capacités Linux non supprimées"; FAIL=1; }
+            [[ "$SECOPT" == *no-new-privileges:true* ]] || { echo "::error::$NAME : no-new-privileges absent"; FAIL=1; }
+            if grep -iE '^[^=]*(PASS|SECRET|TOKEN)[^=]*=' <<< "$ENVS" | grep -vE '^[^=]*_FILE='; then
+              echo "::error::$NAME : secret présent dans les variables d'environnement"; FAIL=1
+            fi
+          done
+          exit $FAIL
 
       - name: Test de santé de l'API (/health)
         run: |
@@ -147,7 +198,9 @@ jobs:
 
       - name: Arrêt et purge des ressources
         if: always()
-        run: docker compose down --volumes --remove-orphans
+        run: |
+          docker compose down --volumes --remove-orphans
+          rm -rf secrets
 
   release:
     name: 6. Distribution sécurisée (GHCR)

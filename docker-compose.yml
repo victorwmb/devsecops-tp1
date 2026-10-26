@@ -1,18 +1,43 @@
+# Durcissement système commun aux deux conteneurs
+x-hardening: &hardening
+  read_only: true                 # système de fichiers racine en lecture seule
+  cap_drop: [ALL]                 # aucune capacité Linux (aucun des deux services n'en a besoin)
+  security_opt:
+    - no-new-privileges:true      # interdit toute élévation de privilèges (setuid, setgid)
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"             # rotation des journaux : pas de saturation du disque hôte
+      max-file: "3"
+
 services:
   api-python:
+    <<: *hardening
     build:
       context: .
       dockerfile: Dockerfile
     image: devsecops-tp1-api:local
+    user: "65532:65532"           # compte nonroot de l'image Chainguard, imposé aussi côté orchestration
     ports:
-      - "5000:5000"
+      - "127.0.0.1:5000:5000"     # exposé uniquement sur la boucle locale de l'hôte
     environment:
-      - ENV=test
-      - DB_USER=testuser
-      - DB_PASSWORD=testpass
-      - DB_NAME=testdb
-      - DB_HOST=db
-      - DB_PORT=5432
+      ENV: test
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: testdb
+      DB_USER: testuser
+      DB_PASSWORD_FILE: /run/secrets/db_password   # chemin du secret, jamais sa valeur
+    secrets:
+      - db_password
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    deploy:
+      resources:
+        limits:
+          pids: 128
+          cpus: "0.50"
+          memory: 256M
     networks:
       - frontend
       - backend
@@ -27,13 +52,28 @@ services:
       start_period: 10s
 
   db:
-    image: cgr.dev/chainguard/postgres@sha256:0c4eaf6cb9bd65337d834f5ebfe79add4312ee2125ab584bf1fbc071abc6bb8f
+    <<: *hardening
+    image: cgr.dev/chainguard/postgres@sha256:b32c0efe4c15bbc08fcd801f619a7d98d44f3f8eca3ec89efad4941a56e8741c
+    # L'image démarre en root (chown + gosu) : on la lance directement sous le compte postgres (uid 70)
+    user: "70:70"
     environment:
       POSTGRES_USER: testuser
-      POSTGRES_PASSWORD: testpass
       POSTGRES_DB: testdb
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
     volumes:
-      - db-data-test:/var/lib/postgresql/data
+      # Monté sur le parent de PGDATA, qui appartient à postgres : le volume hérite de ce propriétaire
+      - pgdata:/var/lib/postgresql
+    tmpfs:
+      - /var/run/postgresql:rw,noexec,nosuid,nodev,uid=70,gid=70,mode=0775,size=1m
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    deploy:
+      resources:
+        limits:
+          pids: 128
+          cpus: "1.00"
+          memory: 512M
     networks:
       - backend
     healthcheck:
@@ -43,11 +83,17 @@ services:
       retries: 5
       start_period: 30s
 
+secrets:
+  db_password:
+    # Fichier local non versionné (voir .gitignore) ; généré aléatoirement à chaque exécution en CI
+    file: ./secrets/db_password.txt
+
 networks:
   frontend:
     driver: bridge
   backend:
     driver: bridge
+    internal: true                # pas de route vers l'extérieur : la base est injoignable hors de la stack
 
 volumes:
-  db-data-test:
+  pgdata:
