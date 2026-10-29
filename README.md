@@ -14,8 +14,8 @@ Architecture : une API Flask (`api-python`) et une base PostgreSQL (`db`).
 ## 1. Liens GHCR
 
 - Package : https://github.com/victorwmb/devsecops-tp1/pkgs/container/devsecops-tp1
-- Dernière version (index multi-architecture amd64 + arm64) : `docker pull ghcr.io/victorwmb/devsecops-tp1:2.0.0`
-- Version initiale : `docker pull ghcr.io/victorwmb/devsecops-tp1:1.0.0`
+- Dernière version : `docker pull ghcr.io/victorwmb/devsecops-tp1:2.0.0` (mêmes images sous `2.0`, `2` et `latest`). C'est un index multi-architecture : Docker choisit automatiquement l'image `linux/amd64` ou `linux/arm64`.
+- Version initiale : `docker pull ghcr.io/victorwmb/devsecops-tp1:1.0.0` (`linux/amd64` uniquement)
 
 ## 2. Avant / Après
 
@@ -133,7 +133,7 @@ Les trois digests ont été mis à jour (`python:latest-dev`, `python:latest`, `
 | Durcissement runtime | api `65532:65532`, db `70:70`, `readonly=true`, `capdrop=[ALL]`, `no-new-privileges:true` |
 | /health, /dbtest | `{"status":"ok"}`, `{"db_connection":"successful"}` |
 | pytest | 3 passed |
-| Publication GHCR | v1.0.0 : https://github.com/victorwmb/devsecops-tp1/actions/runs/37770566165 |
+| Publication GHCR | v1.0.0 : https://github.com/victorwmb/devsecops-tp1/actions/runs/37770566165<br>v2.0.0 : https://github.com/victorwmb/devsecops-tp1/actions/runs/40874124095 |
 
 Le contrôle des secrets, rejoué sur la composition d'origine, échoue comme attendu :
 
