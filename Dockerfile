@@ -10,7 +10,14 @@ RUN --mount=type=cache,id=pip,target=/home/nonroot/.cache/pip,uid=65532,gid=6553
     if ! grep -Eq '^tok_[0-9a-f]{64}$' /run/secrets/pip_token; then \
         echo "Jeton du dépôt de paquets interne absent ou invalide" >&2; exit 1; \
     fi \
+    && if [ "$(awk '$2 == "/run/secrets/pip_token" { print $3 }' /proc/mounts)" != "tmpfs" ]; then \
+        echo "Jeton du dépôt de paquets interne hors mémoire vive" >&2; exit 1; \
+    fi \
     && pip install --no-compile --target /build/deps -r requirements.txt
+
+RUN if [ -e /run/secrets/pip_token ]; then \
+        echo "Jeton du dépôt de paquets interne encore monté après l'instruction" >&2; exit 1; \
+    fi
 
 FROM cgr.dev/chainguard/python@sha256:49fd266eb8a1331194c318b742087c7a2939cc5794fa64f17feb9e17e12703e2
 

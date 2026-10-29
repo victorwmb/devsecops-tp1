@@ -211,7 +211,8 @@ RUN --mount=type=cache,id=pip,target=/home/nonroot/.cache/pip,uid=65532,gid=6553
 - **Pourquoi ce chemin** : le builder Chainguard tourne en `nonroot` (uid 65532), dont le cache pip est `/home/nonroot/.cache/pip`. Les options `uid`/`gid` rendent le cache inscriptible pour ce compte.
 - **Effet** : le cache vit dans le builder, pas dans une couche. Si `requirements.txt` change, la couche est rejouée, mais pip réutilise les wheels déjà téléchargées.
 - **Image finale propre** : seul `/build/deps` est copié dans le runtime. Le cache n'est même pas présent dans la couche du builder.
-- **Hadolint** : la v2.12.0 ne connaissait pas les montages de cache. Sa règle DL3042 n'acceptait que `--no-cache-dir`, ce qui contredisait le sujet. Nous sommes passés à la **v2.15.1** (épinglée par digest) : depuis la v2.14.0, DL3042 accepte un cache monté sur `.cache/pip`. La règle reste active, sans dérogation : un `pip install` sans cache monté ni `--no-cache-dir` échoue toujours.
+- **Hadolint** : la v2.12.0 ne reconnaissait pas les montages de cache. Sa règle DL3042 n'acceptait que `--no-cache-dir`, ce qui contredisait le sujet. Nous sommes passés à la **v2.15.1** (épinglée par digest). Le changelog ne mentionne pas ce changement : nous l'avons vérifié en lançant chaque version sur notre Dockerfile. Les v2.12.0 et v2.13.1 signalent DL3042, les v2.14.0, v2.15.0 et v2.15.1 ne le signalent plus. La règle reste active, sans dérogation : un `pip install` sans cache monté ni `--no-cache-dir` échoue toujours.
+- **Conséquence de la v2.15** : la nouvelle règle DL3066 (niveau info) signale un utilisateur non numérique. Pour garder une sortie Hadolint vierge, `USER nonroot:nonroot` devient `USER 65532:65532`, le même compte, désigné par son uid.
 
 ## 11. Secret de build en mémoire vive
 
@@ -222,9 +223,11 @@ sh init-secrets.sh
 ```
 
 - **Transmission** : uniquement par `--mount=type=secret,id=pip_token`, jamais par `ARG` ni `ENV`. BuildKit monte le fichier en **tmpfs** dans `/run/secrets/pip_token` le temps de cette seule instruction, puis le démonte.
-- **Vérification** : l'étage builder contrôle la présence et le format du jeton avant le `pip install`.
-  - `required=true` fait échouer le build si le secret n'est pas fourni.
+- **Vérification** : l'étage builder contrôle le jeton avant le `pip install`.
+  - `required=true` fait échouer le build si le secret n'est pas fourni (`secret pip_token: not found`).
   - Un jeton mal formé déclenche l'erreur `Jeton du dépôt de paquets interne absent ou invalide`.
+  - Le build lit `/proc/mounts` et échoue si `/run/secrets/pip_token` n'est pas un `tmpfs` (`Jeton du dépôt de paquets interne hors mémoire vive`). Ligne observée pendant le build : `tmpfs /run/secrets/pip_token tmpfs ro,nosuid,nodev,noexec,relatime 0 0`.
+  - L'instruction suivante échoue si le fichier existe encore : la preuve que BuildKit l'a démonté à la fin de l'instruction.
   - Avec un vrai serveur interne, le jeton serait passé à pip par un fichier netrc monté de la même façon.
 - **Scanner de secrets** : les règles intégrées de Trivy ne connaissent pas ce format de jeton. Une règle dédiée (`trivy-secret.yaml`, sévérité CRITICAL) l'ajoute, pour qu'un résultat à 0 soit réellement significatif.
 
@@ -246,6 +249,7 @@ Plus aucune longue ligne `docker build` : tout est décrit dans `docker-bake.hcl
 
 - **Cache externe** : le backend GitHub Actions (`type=gha`) n'est activé que si `GITHUB_ACTIONS=true`. En CI, il est importé et exporté par `api` en `mode=max` : les couches intermédiaires du builder sont aussi conservées entre deux runners éphémères. En local, le build fonctionne sans configuration particulière.
 - **Build unique, image publiée = image testée** : le job 3 construit `api` une seule fois (amd64 + arm64) vers une archive OCI. Les images de test amd64 et arm64 (Dive, Trivy, Compose, contrôle ARM) en sont extraites avec `skopeo`, et le job vérifie que leur configuration est identique octet pour octet à celle de l'archive. Le job 6 ne reconstruit rien : il pousse cette archive avec `skopeo copy --all --preserve-digests`, puis vérifie que chaque tag publié a exactement le digest de l'archive testée et que l'index contient `linux/amd64` et `linux/arm64`.
+- **Entrées `unknown/unknown` de l'index** : ce ne sont pas des images. Ce sont les attestations de provenance que BuildKit ajoute, une par plateforme (`vnd.docker.reference.type: attestation-manifest`). `docker pull` les ignore et ne télécharge que l'image de sa plateforme.
 - **Source unique des tags** : le job 6 lit la liste des tags à publier avec `docker buildx bake --print api`. Les tags de l'archive testée et ceux publiés viennent donc des mêmes variables HCL.
 - **Exécution réelle sur ARM** : le job 3 lance l'image arm64 sous émulation QEMU et importe `psycopg2`, une extension compilée. Une image mal construite échouerait ici. Les deux architectures passent ensuite le gate Trivy (vulnérabilités et secrets).
 
