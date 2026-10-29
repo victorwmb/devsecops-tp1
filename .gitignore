@@ -1,5 +1,6 @@
 # Secrets d'orchestration : ne jamais versionner
 secrets/
+*.token
 .env
 .env.*
 

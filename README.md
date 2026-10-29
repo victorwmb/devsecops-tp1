@@ -14,7 +14,7 @@ Architecture : une API Flask (`api-python`) et une base PostgreSQL (`db`).
 ## 1. Liens GHCR
 
 - Package : https://github.com/victorwmb/devsecops-tp1/pkgs/container/devsecops-tp1
-- Dernière version : `docker pull ghcr.io/victorwmb/devsecops-tp1:2.0.0`
+- Dernière version (index multi-architecture amd64 + arm64) : `docker pull ghcr.io/victorwmb/devsecops-tp1:2.0.0`
 - Version initiale : `docker pull ghcr.io/victorwmb/devsecops-tp1:1.0.0`
 
 ## 2. Avant / Après
@@ -37,7 +37,7 @@ Les valeurs « après » ont été remesurées le 26/10 après la mise à jour d
 
 - **Chainguard plutôt que Distroless** : Chainguard (base Wolfi) est mise à jour plus vite que Distroless (base Debian) et vise 0 CVE. Elle est la même famille que l'image Postgres imposée.
 - **Variante de build** : `latest-dev` (avec pip) a le même Python que `latest` (sans shell ni pip). Les dépendances installées dans le builder fonctionnent donc directement dans l'image finale.
-- **Immuabilité** : toutes les images sont épinglées par digest SHA256 et les dépendances Python par version exacte (`==`).
+- **Immuabilité** : toutes les images sont épinglées par digest SHA256, y compris le frontend BuildKit (`# syntax=docker/dockerfile:1.28.0@sha256:…`), et les dépendances Python par version exacte (`==`).
 
 ## 4. Healthchecks sans shell
 
@@ -186,3 +186,102 @@ Le durcissement réduit fortement la surface d'attaque, mais il ne rend pas la s
 | Pas de rotation | `POSTGRES_PASSWORD_FILE` n'est lu qu'à l'initialisation du volume : changer le fichier ne change pas le mot de passe en base | Identifiants dynamiques et à durée de vie courte (moteur database de Vault) |
 | Un seul identifiant partagé | Le même superutilisateur sert à initialiser la base et à l'API | Un compte d'administration et un compte applicatif distincts |
 | Le secret reste en mémoire | Le processus Python le lit à chaque connexion | Inévitable ; à limiter par des identifiants à courte durée de vie |
+
+---
+
+# TP 2 — Étape 1 : industrialisation du build, secrets de build et multi-architecture
+
+## 10. Cache persistant hors couches
+
+Le Dockerfile active la syntaxe étendue de BuildKit sur sa première ligne. Le frontend est épinglé par digest :
+
+```dockerfile
+# syntax=docker/dockerfile:1.28.0@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
+```
+
+L'installation des dépendances n'utilise plus `--no-cache-dir`. Elle s'appuie sur un **montage de cache** géré par BuildKit :
+
+```dockerfile
+RUN --mount=type=cache,id=pip,target=/home/nonroot/.cache/pip,uid=65532,gid=65532 \
+    --mount=type=secret,id=pip_token,required=true,uid=65532,mode=0400 \
+    ... && pip install --no-compile --target /build/deps -r requirements.txt
+```
+
+- **Pourquoi ce chemin** : le builder Chainguard tourne en `nonroot` (uid 65532), dont le cache pip est `/home/nonroot/.cache/pip`. Les options `uid`/`gid` rendent le cache inscriptible pour ce compte.
+- **Effet** : le cache vit dans le builder, pas dans une couche. Si `requirements.txt` change, la couche est rejouée, mais pip réutilise les wheels déjà téléchargées.
+- **Image finale propre** : seul `/build/deps` est copié dans le runtime. Le cache n'est même pas présent dans la couche du builder.
+- **Hadolint** : la v2.12.0 ne connaissait pas les montages de cache. Sa règle DL3042 n'acceptait que `--no-cache-dir`, ce qui contredisait le sujet. Nous sommes passés à la **v2.15.1** (épinglée par digest) : depuis la v2.14.0, DL3042 accepte un cache monté sur `.cache/pip`. La règle reste active, sans dérogation : un `pip install` sans cache monté ni `--no-cache-dir` échoue toujours.
+
+## 11. Secret de build en mémoire vive
+
+Le jeton du dépôt de paquets interne est **simulé** par un fichier local `secrets/pip_token.txt`, au format `tok_<64 caractères hexadécimaux>`. Il est exclu de Git (`.gitignore`) et du contexte de build (`.dockerignore`).
+
+```bash
+mkdir -p secrets
+printf 'tok_%s' "$(openssl rand -hex 32 | tr -d '\r\n')" > secrets/pip_token.txt
+```
+
+- **Transmission** : uniquement par `--mount=type=secret,id=pip_token`, jamais par `ARG` ni `ENV`. BuildKit monte le fichier en **tmpfs** dans `/run/secrets/pip_token` le temps de cette seule instruction, puis le démonte.
+- **Vérification** : l'étage builder contrôle la présence et le format du jeton avant le `pip install`.
+  - `required=true` fait échouer le build si le secret n'est pas fourni.
+  - Un jeton mal formé déclenche l'erreur `Jeton du dépôt de paquets interne absent ou invalide`.
+  - Avec un vrai serveur interne, le jeton serait passé à pip par un fichier netrc monté de la même façon.
+- **Scanner de secrets** : les règles intégrées de Trivy ne connaissent pas ce format de jeton. Une règle dédiée (`trivy-secret.yaml`, sévérité CRITICAL) l'ajoute, pour qu'un résultat à 0 soit réellement significatif.
+
+Contrôles en CI (bloquants) :
+
+1. **Job 3** : le jeton (aléatoire, propre à chaque exécution) est recherché dans `docker history --no-trunc`, dans `docker image inspect` et dans tout le système de fichiers exporté, pour les deux architectures.
+2. **Job 4** : `trivy image --scanners secret --image-config-scanners secret --secret-config trivy-secret.yaml` analyse les couches **et** la configuration de l'image (historique, variables, labels).
+
+## 12. Build déclaratif multi-architecture (`docker-bake.hcl`)
+
+Plus aucune longue ligne `docker build` : tout est décrit dans `docker-bake.hcl`.
+
+| Élément | Rôle |
+|---|---|
+| `variable "REGISTRY"`, `"IMAGE_NAME"`, `"VERSION"` | Identifiant de registre et étiquette de version, surchargeables par variable d'environnement |
+| `target "_common"` | Contexte, Dockerfile, secret `pip_token`, import du cache externe |
+| `target "api"` | Image publiée : `linux/amd64` + `linux/arm64`. Seule cible qui **exporte** le cache, en `mode=max` |
+| `target "api-local"`, `"api-arm64"` | Variantes chargées dans le démon pour les tests (Dive, Trivy, Compose, contrôle ARM) |
+| `target "docker-metadata-action"` | En CI, remplacé par le fichier Bake de `docker/metadata-action` (tags SemVer, labels OCI) |
+| `group "default"` / `group "ci"` | `docker buildx bake` (local) / les trois cibles (CI) |
+
+- **Cache externe** : le backend GitHub Actions (`type=gha`) n'est activé que si `GITHUB_ACTIONS=true`. En CI, il est importé par toutes les cibles et exporté par `api` en `mode=max` : les couches intermédiaires du builder sont aussi conservées entre deux runners éphémères. En local, le build fonctionne sans configuration particulière.
+- **Index unifié** : le job de release publie `api` avec `push: true`. La dernière étape lit l'index sur GHCR (`docker buildx imagetools inspect`) et échoue s'il manque `linux/amd64` ou `linux/arm64`.
+- **Exécution réelle sur ARM** : le job 3 lance l'image arm64 sous émulation QEMU et importe `psycopg2`, une extension compilée. Une image mal construite échouerait ici. Les deux architectures passent ensuite le gate Trivy (vulnérabilités et secrets).
+
+Commandes :
+
+```bash
+docker buildx bake                      # image amd64 de test, chargée sous devsecops-tp1-api:local
+docker buildx bake ci                   # amd64 + arm64 + variantes de test
+VERSION=1.2.3 docker buildx bake api    # tag ghcr.io/victorwmb/devsecops-tp1:1.2.3
+```
+
+## 13. Preuves d'exécution (TP 2 — Étape 1)
+
+| Contrôle | Résultat |
+|---|---|
+| Hadolint v2.15.1 | 0 erreur, 0 warning, 0 info |
+| Build `bake ci` (amd64 + arm64) | OK en 43 s |
+| Index local `ghcr.io/victorwmb/devsecops-tp1:dev` | `linux/amd64` + `linux/arm64` |
+| Image arm64 sous QEMU | `aarch64 flask 3.1.3 psycopg2 2.9.13` |
+| Cache après passage de `pytest` 9.1.1 → 9.1.0 | 12 paquets « Using cached », 1 seul téléchargé (`pytest-9.1.0`) |
+| Fichiers de cache dans l'image finale | 0 |
+| Dive | 99,73 % |
+| Jeton dans `history --no-trunc` / `inspect` / fichiers | 0 / 0 / 0 (amd64 et arm64) |
+| Trivy secrets (règle du jeton) | 0 secret sur nos images |
+| Build sans jeton / avec jeton invalide | échec / échec (`Jeton du dépôt de paquets interne absent ou invalide`) |
+| Compose, pytest, contrôles de durcissement | `healthy`, 3 passed, OK |
+
+**Contre-test** : une image construite avec le jeton en `ARG` (la mauvaise pratique) expose `PIP_TOKEN=tok_…` en clair dans `docker history`. Trivy la bloque (2 secrets CRITICAL `internal-pip-token`, code de retour 1).
+
+## 14. Limites de l'étape 1
+
+| Limite | Explication | Piste |
+|---|---|---|
+| Le cache pip n'est pas exporté | `--mount=type=cache` vit dans le builder : sur un runner éphémère, il repart vide. Le cache GHA (`mode=max`) ne contient que les couches | `reproducible-containers/buildkit-cache-dance` pour sauvegarder les montages de cache |
+| La release reconstruit l'image | Le job 6 reconstruit depuis le cache GHA : couches identiques à celles testées, mais configuration enrichie des labels OCI, donc digest différent | Signature et attestation de provenance (étapes suivantes), ou promotion de l'image testée par digest |
+| Émulation QEMU | Le build et le test arm64 sont plus lents qu'en natif | Runners ARM natifs (`ubuntu-24.04-arm`) et build par plateforme |
+| Cache GHA limité | 10 Go par dépôt, avec éviction des plus anciennes entrées | Cache registre (`type=registry`) sur GHCR |
+| Jeton simulé | Aucun serveur de paquets interne réel : le jeton est seulement vérifié | Index privé et fichier netrc monté en secret |

@@ -17,6 +17,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      secrets:
+        - pip_token
     image: devsecops-tp1-api:local
     user: "65532:65532"           # compte nonroot de l'image Chainguard, imposé aussi côté orchestration
     ports:
@@ -87,6 +89,8 @@ secrets:
   db_password:
     # Fichier local non versionné (voir .gitignore) ; généré aléatoirement à chaque exécution en CI
     file: ./secrets/db_password.txt
+  pip_token:
+    file: ./secrets/pip_token.txt
 
 networks:
   frontend:
