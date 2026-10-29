@@ -9,6 +9,10 @@ on:
 
 permissions: {}
 
+defaults:
+  run:
+    shell: bash
+
 env:
   IMAGE: devsecops-tp1-api:local
   IMAGE_NAME: ${{ github.repository }}
@@ -291,16 +295,17 @@ jobs:
           name: image
           path: ${{ runner.temp }}
 
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Tags SemVer définis par docker-bake.hcl
+      - name: Tags SemVer enregistrés dans l'archive OCI testée (calculés par docker-bake.hcl)
         run: |
+          INDEX=$(tar -xOf "$RUNNER_TEMP/image-oci.tar" index.json)
+          TAGS=$(jq -r '.manifests[].annotations["io.containerd.image.name"]' <<< "$INDEX")
+          echo "$TAGS"
+          grep -q ":${VERSION#v}$" <<< "$TAGS" || { echo "::error::L'archive OCI ne porte pas le tag ${VERSION#v}"; exit 1; }
           {
             echo "TAGS<<EOF"
-            docker buildx bake -f docker-bake.hcl --print api | jq -r '.target.api.tags[]'
+            echo "$TAGS"
             echo "EOF"
-            echo "OCI=oci-archive:$RUNNER_TEMP/image-oci.tar:$(tar -xOf "$RUNNER_TEMP/image-oci.tar" index.json | jq -r '.manifests[0].annotations["org.opencontainers.image.ref.name"]')"
+            echo "OCI=oci-archive:$RUNNER_TEMP/image-oci.tar:$(jq -r '.manifests[0].annotations["org.opencontainers.image.ref.name"]' <<< "$INDEX")"
           } >> "$GITHUB_ENV"
 
       - name: Connexion à GHCR (jeton natif du workflow)
