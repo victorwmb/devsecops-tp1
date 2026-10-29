@@ -114,7 +114,7 @@ Les trois digests ont été mis à jour (`python:latest-dev`, `python:latest`, `
 - **Permissions** : `permissions: {}` au niveau du workflow. Chaque job ne reçoit que `contents: read`, et seul le job de publication obtient `packages: write`.
 - **Connexion à GHCR** : via le jeton natif `GITHUB_TOKEN`.
 - **Épinglage** : les actions sont épinglées par SHA de commit (un tag peut être déplacé, un SHA non), et les outils Hadolint, Dive et Trivy par digest.
-- **SemVer** : la publication n'a lieu que sur un tag `vX.Y.Z`, si tous les jobs précédents ont réussi. Par exemple, `v1.2.3` publie les tags `1.2.3`, `1.2`, `1` et `latest`.
+- **SemVer** : la publication n'a lieu que sur un tag `vX.Y.Z`, si tous les jobs précédents ont réussi. Par exemple, `v1.2.3` publie les tags `1.2.3`, `1.2`, `1` et `latest`, calculés par `docker-bake.hcl`.
 - **Version 2.0.0** : l'image ne lit plus le mot de passe dans `DB_PASSWORD` mais dans le fichier pointé par `DB_PASSWORD_FILE`. Un déploiement configuré pour la 1.x ne fonctionne donc plus tel quel : c'est un changement incompatible, d'où une version **majeure**.
 - **Contrôles de la composition** (job 5, bloquants) :
   - avant le démarrage, `docker compose config` + `jq` fait échouer le job si une variable `*PASS*`, `*SECRET*` ou `*TOKEN*` autre qu'un `*_FILE` est déclarée ;
@@ -239,31 +239,31 @@ Plus aucune longue ligne `docker build` : tout est décrit dans `docker-bake.hcl
 
 | Élément | Rôle |
 |---|---|
-| `variable "REGISTRY"`, `"IMAGE_NAME"`, `"VERSION"` | Identifiant de registre et étiquette de version, surchargeables par variable d'environnement |
-| `target "_common"` | Contexte, Dockerfile, secret `pip_token`, import du cache externe |
-| `target "api"` | Image publiée : `linux/amd64` + `linux/arm64`. Seule cible qui **exporte** le cache, en `mode=max` |
-| `target "api-local"`, `"api-arm64"` | Variantes chargées dans le démon pour les tests en local |
-| `target "docker-metadata-action"` | En CI, complété par le fichier de labels OCI de `docker/metadata-action` |
-| `group "default"` / `group "ci"` | `docker buildx bake` / `docker buildx bake ci` (local) |
+| `variable "REGISTRY"`, `"IMAGE_NAME"`, `"VERSION"` | Identifiant de registre, nom d'image et version, surchargeables par variable d'environnement. En CI, `IMAGE_NAME` vaut le dépôt GitHub et `VERSION` le tag Git (`dev` hors tag) |
+| `function "semver_tags"` | Déclinaisons SemVer : `2.0.1` donne `2.0.1`, `2.0`, `2` et `latest` (pas de tag majeur en `0.x`, un seul tag pour une pré-version) |
+| `target "api"` | Image publiée : `linux/amd64` + `linux/arm64`, tags et labels OCI (`source`, `version`) calculés depuis les variables, secret `pip_token`, import et export du cache en `mode=max` |
+| `group "default"` | `docker buildx bake` construit `api` sur les deux architectures |
 
 - **Cache externe** : le backend GitHub Actions (`type=gha`) n'est activé que si `GITHUB_ACTIONS=true`. En CI, il est importé et exporté par `api` en `mode=max` : les couches intermédiaires du builder sont aussi conservées entre deux runners éphémères. En local, le build fonctionne sans configuration particulière.
 - **Build unique, image publiée = image testée** : le job 3 construit `api` une seule fois (amd64 + arm64) vers une archive OCI. Les images de test amd64 et arm64 (Dive, Trivy, Compose, contrôle ARM) en sont extraites avec `skopeo`, et le job vérifie que leur configuration est identique octet pour octet à celle de l'archive. Le job 6 ne reconstruit rien : il pousse cette archive avec `skopeo copy --all --preserve-digests`, puis vérifie que chaque tag publié a exactement le digest de l'archive testée et que l'index contient `linux/amd64` et `linux/arm64`.
+- **Source unique des tags** : le job 6 lit la liste des tags à publier avec `docker buildx bake --print api`. Les tags de l'archive testée et ceux publiés viennent donc des mêmes variables HCL.
 - **Exécution réelle sur ARM** : le job 3 lance l'image arm64 sous émulation QEMU et importe `psycopg2`, une extension compilée. Une image mal construite échouerait ici. Les deux architectures passent ensuite le gate Trivy (vulnérabilités et secrets).
 
 Commandes :
 
 ```bash
-docker buildx bake                      # image amd64 de test, chargée sous devsecops-tp1-api:local
-docker buildx bake ci                   # amd64 + arm64 + variantes de test
-VERSION=1.2.3 docker buildx bake api    # tag ghcr.io/victorwmb/devsecops-tp1:1.2.3
+docker buildx bake
+VERSION=1.2.3 docker buildx bake --print
 ```
+
+La première construit l'image pour les deux architectures. Avec Docker Desktop (magasin d'images containerd), l'index est chargé localement sous `ghcr.io/victorwmb/devsecops-tp1:dev`. La seconde affiche les tags qui seraient publiés pour la version 1.2.3.
 
 ## 13. Preuves d'exécution (TP 2 — Étape 1)
 
 | Contrôle | Résultat |
 |---|---|
 | Hadolint v2.15.1 | 0 erreur, 0 warning, 0 info |
-| Build `bake ci` (amd64 + arm64) | OK en 43 s |
+| Build `docker buildx bake` (amd64 + arm64) | OK |
 | Index local `ghcr.io/victorwmb/devsecops-tp1:dev` | `linux/amd64` + `linux/arm64` |
 | Image arm64 sous QEMU | `aarch64 flask 3.1.3 psycopg2 2.9.13` |
 | Cache après passage de `pytest` 9.1.1 → 9.1.0 | 12 paquets « Using cached », 1 seul téléchargé (`pytest-9.1.0`) |

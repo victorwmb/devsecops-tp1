@@ -11,6 +11,8 @@ permissions: {}
 
 env:
   IMAGE: devsecops-tp1-api:local
+  IMAGE_NAME: ${{ github.repository }}
+  VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dev' }}
   HADOLINT_IMAGE: hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d
   DIVE_IMAGE: wagoodman/dive:v0.13.1@sha256:f1886e6c32c094fc41a623c1989f5cb3e48aa766da5f0be233f911fc1d85ce10
   TRIVY_IMAGE: aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
@@ -74,32 +76,25 @@ jobs:
           echo "::add-mask::$(cat secrets/db_password.txt)"
           echo "::add-mask::$(cat secrets/pip_token.txt)"
 
-      - name: Labels OCI
-        id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ghcr.io/${{ github.repository }}
-
       - name: Build unique amd64 + arm64 via Bake vers une archive OCI (cache GHA importé et exporté en mode max)
         uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
         with:
           source: .
-          files: |
-            docker-bake.hcl
-            ${{ steps.meta.outputs.bake-file-labels }}
+          files: docker-bake.hcl
           targets: api
           set: api.output=type=oci,dest=${{ runner.temp }}/image-oci.tar
           allow: fs.write=${{ runner.temp }}
 
       - name: Extraction des images amd64 et arm64 depuis l'archive OCI
         run: |
-          skopeo copy --override-arch amd64 "oci-archive:$RUNNER_TEMP/image-oci.tar" "docker-archive:$RUNNER_TEMP/image.tar:$IMAGE"
-          skopeo copy --override-arch arm64 "oci-archive:$RUNNER_TEMP/image-oci.tar" "docker-archive:$RUNNER_TEMP/image-arm64.tar:devsecops-tp1-api:arm64"
+          OCI="oci-archive:$RUNNER_TEMP/image-oci.tar:$(tar -xOf "$RUNNER_TEMP/image-oci.tar" index.json | jq -r '.manifests[0].annotations["org.opencontainers.image.ref.name"]')"
+          skopeo copy --override-arch amd64 "$OCI" "docker-archive:$RUNNER_TEMP/image.tar:$IMAGE"
+          skopeo copy --override-arch arm64 "$OCI" "docker-archive:$RUNNER_TEMP/image-arm64.tar:devsecops-tp1-api:arm64"
           docker load -i "$RUNNER_TEMP/image.tar"
           docker load -i "$RUNNER_TEMP/image-arm64.tar"
           for PAIR in "amd64 image.tar" "arm64 image-arm64.tar"; do
             read -r ARCH TAR <<< "$PAIR"
-            EXPECTED="sha256:$(skopeo inspect --override-arch "$ARCH" --config --raw "oci-archive:$RUNNER_TEMP/image-oci.tar" | sha256sum | cut -d' ' -f1)"
+            EXPECTED="sha256:$(skopeo inspect --override-arch "$ARCH" --config --raw "$OCI" | sha256sum | cut -d' ' -f1)"
             EXTRACTED="sha256:$(skopeo inspect --config --raw "docker-archive:$RUNNER_TEMP/$TAR" | sha256sum | cut -d' ' -f1)"
             echo "$ARCH : configuration archive OCI=$EXPECTED $TAR=$EXTRACTED"
             [ "$EXPECTED" = "$EXTRACTED" ] || { echo "::error::$TAR ne provient pas de l'archive OCI"; exit 1; }
@@ -296,15 +291,17 @@ jobs:
           name: image
           path: ${{ runner.temp }}
 
-      - name: Calcul des tags SemVer
-        id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Tags SemVer définis par docker-bake.hcl
+        run: |
+          {
+            echo "TAGS<<EOF"
+            docker buildx bake -f docker-bake.hcl --print api | jq -r '.target.api.tags[]'
+            echo "EOF"
+            echo "OCI=oci-archive:$RUNNER_TEMP/image-oci.tar:$(tar -xOf "$RUNNER_TEMP/image-oci.tar" index.json | jq -r '.manifests[0].annotations["org.opencontainers.image.ref.name"]')"
+          } >> "$GITHUB_ENV"
 
       - name: Connexion à GHCR (jeton natif du workflow)
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -314,18 +311,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publication de l'archive OCI testée (index amd64 + arm64, digests préservés)
-        env:
-          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           for TAG in $TAGS; do
-            skopeo copy --all --preserve-digests "oci-archive:$RUNNER_TEMP/image-oci.tar" "docker://$TAG"
+            skopeo copy --all --preserve-digests "$OCI" "docker://$TAG"
           done
 
       - name: Vérification de l'index publié (digest identique à l'image testée)
-        env:
-          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          EXPECTED="sha256:$(skopeo inspect --raw "oci-archive:$RUNNER_TEMP/image-oci.tar" | sha256sum | cut -d' ' -f1)"
+          EXPECTED="sha256:$(skopeo inspect --raw "$OCI" | sha256sum | cut -d' ' -f1)"
           for TAG in $TAGS; do
             DIGEST="sha256:$(skopeo inspect --raw "docker://$TAG" | sha256sum | cut -d' ' -f1)"
             echo "$TAG : $DIGEST"
