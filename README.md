@@ -14,7 +14,8 @@ Architecture : une API Flask (`api-python`) et une base PostgreSQL (`db`).
 ## 1. Liens GHCR
 
 - Package : https://github.com/victorwmb/devsecops-tp1/pkgs/container/devsecops-tp1
-- Dernière version : `docker pull ghcr.io/victorwmb/devsecops-tp1:2.0.0` (mêmes images sous `2.0`, `2` et `latest`). C'est un index multi-architecture : Docker choisit automatiquement l'image `linux/amd64` ou `linux/arm64`.
+- Dernière version : `docker pull ghcr.io/victorwmb/devsecops-tp1:2.0.2` (mêmes images sous `2.0`, `2` et `latest`). C'est un index multi-architecture : Docker choisit automatiquement l'image `linux/amd64` ou `linux/arm64`. C'est exactement l'image testée par la CI (même digest).
+- Version 2.0.0 : `docker pull ghcr.io/victorwmb/devsecops-tp1:2.0.0` (première version multi-architecture, produite par l'ancienne release qui reconstruisait l'image)
 - Version initiale : `docker pull ghcr.io/victorwmb/devsecops-tp1:1.0.0` (`linux/amd64` uniquement)
 
 ## 2. Avant / Après
@@ -134,7 +135,7 @@ Les trois digests ont été mis à jour (`python:latest-dev`, `python:latest`, `
 | Durcissement runtime | api `65532:65532`, db `70:70`, `readonly=true`, `capdrop=[ALL]`, `no-new-privileges:true` |
 | /health, /dbtest | `{"status":"ok"}`, `{"db_connection":"successful"}` |
 | pytest | 3 passed |
-| Publication GHCR | v1.0.0 : https://github.com/victorwmb/devsecops-tp1/actions/runs/37770566165<br>v2.0.0 : https://github.com/victorwmb/devsecops-tp1/actions/runs/40874124095 |
+| Publication GHCR | v1.0.0 : https://github.com/victorwmb/devsecops-tp1/actions/runs/37770566165<br>v2.0.0 : https://github.com/victorwmb/devsecops-tp1/actions/runs/40874124095<br>v2.0.2 : https://github.com/victorwmb/devsecops-tp1/actions/runs/40895413441 |
 
 Le contrôle des secrets, rejoué sur la composition d'origine, échoue comme attendu :
 
@@ -270,14 +271,40 @@ La première construit l'image pour les deux architectures. Avec Docker Desktop 
 | Hadolint v2.15.1 | 0 erreur, 0 warning, 0 info |
 | Build `docker buildx bake` (amd64 + arm64) | OK |
 | Index local `ghcr.io/victorwmb/devsecops-tp1:dev` | `linux/amd64` + `linux/arm64` |
+| Index publié `ghcr.io/victorwmb/devsecops-tp1:2.0.2` | `sha256:6ae6b11a…` : `linux/amd64` + `linux/arm64` (+ 2 attestations `unknown/unknown`) ; `2.0`, `2` et `latest` au même digest |
+| Digest publié = digest de l'archive testée | vérifié par le job 6 pour les 4 tags (https://github.com/victorwmb/devsecops-tp1/actions/runs/40895413441) |
+| Image publiée (amd64 et arm64) | utilisateur `65532:65532`, label `org.opencontainers.image.version=2.0.2`, ni jeton ni `pip_token` dans `history --no-trunc` |
+| Montage du jeton pendant le build | `tmpfs /run/secrets/pip_token tmpfs ro,nosuid,nodev,noexec,relatime`, absent à l'instruction suivante |
 | Image arm64 sous QEMU | `aarch64 flask 3.1.3 psycopg2 2.9.13` |
 | Cache après passage de `pytest` 9.1.1 → 9.1.0 | 12 paquets « Using cached », 1 seul téléchargé (`pytest-9.1.0`) |
 | Fichiers de cache dans l'image finale | 0 |
 | Dive | 99,73 % |
 | Jeton dans `history --no-trunc` / `inspect` / fichiers | 0 / 0 / 0 (amd64 et arm64) |
 | Trivy secrets (règle du jeton) | 0 secret sur nos images |
-| Build sans jeton / avec jeton invalide | échec / échec (`Jeton du dépôt de paquets interne absent ou invalide`) |
+| Build sans jeton / avec jeton invalide | échec (`secret pip_token: not found`) / échec (`Jeton du dépôt de paquets interne absent ou invalide`) |
 | Compose, pytest, contrôles de durcissement | `healthy`, 3 passed, OK |
+
+Index publié sur GHCR (`docker buildx imagetools inspect ghcr.io/victorwmb/devsecops-tp1:2.0.2`, extrait) :
+
+```
+MediaType: application/vnd.oci.image.index.v1+json
+Digest:    sha256:6ae6b11acb83ea467c8df8896148012924820573214807deabdb6cb40bd2ba88
+Manifests:
+  Name:        ghcr.io/victorwmb/devsecops-tp1:2.0.2@sha256:d5011c898b65eeaa167e6c315a2421240b9cdca1486441ad7dfbdca3ac8e1ded
+  Platform:    linux/amd64
+  Name:        ghcr.io/victorwmb/devsecops-tp1:2.0.2@sha256:879f939e207bc863a2897fa9610541cb84b7c52a4709aa85509c2d90d3a8ac38
+  Platform:    linux/arm64
+  Name:        ghcr.io/victorwmb/devsecops-tp1:2.0.2@sha256:40c6468f5f2f03f64a418347d201dbfa28bd4e01fdb821ab35748ee511732b8b
+  Platform:    unknown/unknown
+  Annotations:
+    vnd.docker.reference.digest: sha256:d5011c898b65eeaa167e6c315a2421240b9cdca1486441ad7dfbdca3ac8e1ded
+    vnd.docker.reference.type:   attestation-manifest
+  Name:        ghcr.io/victorwmb/devsecops-tp1:2.0.2@sha256:4bf312b42e9b8c6b17ed17176bd5159d7a2c8c9fb1a3221ba77cdd43e4904273
+  Platform:    unknown/unknown
+  Annotations:
+    vnd.docker.reference.digest: sha256:879f939e207bc863a2897fa9610541cb84b7c52a4709aa85509c2d90d3a8ac38
+    vnd.docker.reference.type:   attestation-manifest
+```
 
 **Contre-test** : une image construite avec le jeton en `ARG` (la mauvaise pratique) expose `PIP_TOKEN=tok_…` en clair dans `docker history`. Trivy la bloque (2 secrets CRITICAL `internal-pip-token`, code de retour 1).
 
