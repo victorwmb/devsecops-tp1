@@ -63,10 +63,11 @@ Les valeurs « après » ont été remesurées le 26/10 après la mise à jour d
 Lancement en local :
 
 ```bash
-mkdir -p secrets
-openssl rand -hex 32 | tr -d '\r\n' > secrets/db_password.txt   # tr : sous Windows, openssl ajoute un \r
+sh init-secrets.sh
 docker compose up -d --build --wait
 ```
+
+`init-secrets.sh` génère `secrets/db_password.txt` et `secrets/pip_token.txt` s'ils sont absents (un mot de passe existant n'est jamais écrasé, sinon il ne correspondrait plus au volume Postgres). La CI utilise le même script.
 
 ### Durcissement système des conteneurs
 
@@ -217,8 +218,7 @@ RUN --mount=type=cache,id=pip,target=/home/nonroot/.cache/pip,uid=65532,gid=6553
 Le jeton du dépôt de paquets interne est **simulé** par un fichier local `secrets/pip_token.txt`, au format `tok_<64 caractères hexadécimaux>`. Il est exclu de Git (`.gitignore`) et du contexte de build (`.dockerignore`).
 
 ```bash
-mkdir -p secrets
-printf 'tok_%s' "$(openssl rand -hex 32 | tr -d '\r\n')" > secrets/pip_token.txt
+sh init-secrets.sh
 ```
 
 - **Transmission** : uniquement par `--mount=type=secret,id=pip_token`, jamais par `ARG` ni `ENV`. BuildKit monte le fichier en **tmpfs** dans `/run/secrets/pip_token` le temps de cette seule instruction, puis le démonte.
