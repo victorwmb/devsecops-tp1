@@ -230,7 +230,7 @@ sh init-secrets.sh
 
 Contrôles en CI (bloquants) :
 
-1. **Job 3** : le jeton (aléatoire, propre à chaque exécution) est recherché dans `docker history --no-trunc`, dans `docker image inspect` et dans tout le système de fichiers exporté, pour les deux architectures.
+1. **Job 3** : le jeton (aléatoire, propre à chaque exécution) est recherché dans `docker history --no-trunc`, dans `docker image inspect` et dans tout le système de fichiers exporté, pour les deux architectures, ainsi que dans l'archive OCI publiée (index, manifestes, configurations et attestations).
 2. **Job 4** : `trivy image --scanners secret --image-config-scanners secret --secret-config trivy-secret.yaml` analyse les couches **et** la configuration de l'image (historique, variables, labels).
 
 ## 12. Build déclaratif multi-architecture (`docker-bake.hcl`)
@@ -242,12 +242,12 @@ Plus aucune longue ligne `docker build` : tout est décrit dans `docker-bake.hcl
 | `variable "REGISTRY"`, `"IMAGE_NAME"`, `"VERSION"` | Identifiant de registre et étiquette de version, surchargeables par variable d'environnement |
 | `target "_common"` | Contexte, Dockerfile, secret `pip_token`, import du cache externe |
 | `target "api"` | Image publiée : `linux/amd64` + `linux/arm64`. Seule cible qui **exporte** le cache, en `mode=max` |
-| `target "api-local"`, `"api-arm64"` | Variantes chargées dans le démon pour les tests (Dive, Trivy, Compose, contrôle ARM) |
-| `target "docker-metadata-action"` | En CI, remplacé par le fichier Bake de `docker/metadata-action` (tags SemVer, labels OCI) |
-| `group "default"` / `group "ci"` | `docker buildx bake` (local) / les trois cibles (CI) |
+| `target "api-local"`, `"api-arm64"` | Variantes chargées dans le démon pour les tests en local |
+| `target "docker-metadata-action"` | En CI, complété par le fichier de labels OCI de `docker/metadata-action` |
+| `group "default"` / `group "ci"` | `docker buildx bake` / `docker buildx bake ci` (local) |
 
-- **Cache externe** : le backend GitHub Actions (`type=gha`) n'est activé que si `GITHUB_ACTIONS=true`. En CI, il est importé par toutes les cibles et exporté par `api` en `mode=max` : les couches intermédiaires du builder sont aussi conservées entre deux runners éphémères. En local, le build fonctionne sans configuration particulière.
-- **Index unifié** : le job de release publie `api` avec `push: true`. La dernière étape lit l'index sur GHCR (`docker buildx imagetools inspect`) et échoue s'il manque `linux/amd64` ou `linux/arm64`.
+- **Cache externe** : le backend GitHub Actions (`type=gha`) n'est activé que si `GITHUB_ACTIONS=true`. En CI, il est importé et exporté par `api` en `mode=max` : les couches intermédiaires du builder sont aussi conservées entre deux runners éphémères. En local, le build fonctionne sans configuration particulière.
+- **Build unique, image publiée = image testée** : le job 3 construit `api` une seule fois (amd64 + arm64) vers une archive OCI. Les images de test amd64 et arm64 (Dive, Trivy, Compose, contrôle ARM) en sont extraites avec `skopeo`, et le job vérifie que leur configuration est identique octet pour octet à celle de l'archive. Le job 6 ne reconstruit rien : il pousse cette archive avec `skopeo copy --all --preserve-digests`, puis vérifie que chaque tag publié a exactement le digest de l'archive testée et que l'index contient `linux/amd64` et `linux/arm64`.
 - **Exécution réelle sur ARM** : le job 3 lance l'image arm64 sous émulation QEMU et importe `psycopg2`, une extension compilée. Une image mal construite échouerait ici. Les deux architectures passent ensuite le gate Trivy (vulnérabilités et secrets).
 
 Commandes :
@@ -281,7 +281,6 @@ VERSION=1.2.3 docker buildx bake api    # tag ghcr.io/victorwmb/devsecops-tp1:1.
 | Limite | Explication | Piste |
 |---|---|---|
 | Le cache pip n'est pas exporté | `--mount=type=cache` vit dans le builder : sur un runner éphémère, il repart vide. Le cache GHA (`mode=max`) ne contient que les couches | `reproducible-containers/buildkit-cache-dance` pour sauvegarder les montages de cache |
-| La release reconstruit l'image | Le job 6 reconstruit depuis le cache GHA : couches identiques à celles testées, mais configuration enrichie des labels OCI, donc digest différent | Signature et attestation de provenance (étapes suivantes), ou promotion de l'image testée par digest |
 | Émulation QEMU | Le build et le test arm64 sont plus lents qu'en natif | Runners ARM natifs (`ubuntu-24.04-arm`) et build par plateforme |
 | Cache GHA limité | 10 Go par dépôt, avec éviction des plus anciennes entrées | Cache registre (`type=registry`) sur GHCR |
 | Jeton simulé | Aucun serveur de paquets interne réel : le jeton est seulement vérifié | Index privé et fichier netrc monté en secret |

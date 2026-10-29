@@ -74,12 +74,36 @@ jobs:
           echo "::add-mask::$(cat secrets/db_password.txt)"
           echo "::add-mask::$(cat secrets/pip_token.txt)"
 
-      - name: Build amd64 + arm64 via Bake (cache GHA importé et exporté en mode max)
+      - name: Labels OCI
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+
+      - name: Build unique amd64 + arm64 via Bake vers une archive OCI (cache GHA importé et exporté en mode max)
         uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
         with:
           source: .
-          files: docker-bake.hcl
-          targets: ci
+          files: |
+            docker-bake.hcl
+            ${{ steps.meta.outputs.bake-file-labels }}
+          targets: api
+          set: api.output=type=oci,dest=${{ runner.temp }}/image-oci.tar
+          allow: fs.write=${{ runner.temp }}
+
+      - name: Extraction des images amd64 et arm64 depuis l'archive OCI
+        run: |
+          skopeo copy --override-arch amd64 "oci-archive:$RUNNER_TEMP/image-oci.tar" "docker-archive:$RUNNER_TEMP/image.tar:$IMAGE"
+          skopeo copy --override-arch arm64 "oci-archive:$RUNNER_TEMP/image-oci.tar" "docker-archive:$RUNNER_TEMP/image-arm64.tar:devsecops-tp1-api:arm64"
+          docker load -i "$RUNNER_TEMP/image.tar"
+          docker load -i "$RUNNER_TEMP/image-arm64.tar"
+          for PAIR in "amd64 image.tar" "arm64 image-arm64.tar"; do
+            read -r ARCH TAR <<< "$PAIR"
+            EXPECTED="sha256:$(skopeo inspect --override-arch "$ARCH" --config --raw "oci-archive:$RUNNER_TEMP/image-oci.tar" | sha256sum | cut -d' ' -f1)"
+            EXTRACTED="sha256:$(skopeo inspect --config --raw "docker-archive:$RUNNER_TEMP/$TAR" | sha256sum | cut -d' ' -f1)"
+            echo "$ARCH : configuration archive OCI=$EXPECTED $TAR=$EXTRACTED"
+            [ "$EXPECTED" = "$EXTRACTED" ] || { echo "::error::$TAR ne provient pas de l'archive OCI"; exit 1; }
+          done
 
       - name: Contrôle d'exécution de l'image arm64 (émulation QEMU)
         run: |
@@ -100,14 +124,12 @@ jobs:
             echo "$IMG : historique=$IN_HISTORY configuration=$IN_CONFIG fichiers=$IN_FS"
             [ "$IN_HISTORY$IN_CONFIG$IN_FS" = "000" ] || { echo "::error::Jeton de build retrouvé dans $IMG"; FAIL=1; }
           done
+          IN_OCI=$(tar -xOf "$RUNNER_TEMP/image-oci.tar" | grep -caF "$TOKEN" || true)
+          echo "archive OCI (index, manifestes, configurations, attestations) : $IN_OCI"
+          [ "$IN_OCI" = "0" ] || { echo "::error::Jeton de build retrouvé dans l'archive OCI"; FAIL=1; }
           docker history --no-trunc "$IMAGE"
           rm -f secrets/pip_token.txt
           exit $FAIL
-
-      - name: Export des images pour les jobs suivants
-        run: |
-          docker save "$IMAGE" -o "$RUNNER_TEMP/image.tar"
-          docker save devsecops-tp1-api:arm64 -o "$RUNNER_TEMP/image-arm64.tar"
 
       - name: Dive en mode CI (efficience minimale 80 %)
         run: |
@@ -121,6 +143,7 @@ jobs:
           path: |
             ${{ runner.temp }}/image.tar
             ${{ runner.temp }}/image-arm64.tar
+            ${{ runner.temp }}/image-oci.tar
           retention-days: 1
 
   security:
@@ -267,16 +290,11 @@ jobs:
       contents: read
       packages: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Émulation QEMU (arm64)
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - name: Récupération de l'archive OCI testée
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          platforms: arm64
-
-      - name: Builder BuildKit (buildx)
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+          name: image
+          path: ${{ runner.temp }}
 
       - name: Calcul des tags SemVer
         id: meta
@@ -295,32 +313,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Génération des secrets éphémères
-        run: |
-          sh init-secrets.sh
-          echo "::add-mask::$(cat secrets/db_password.txt)"
-          echo "::add-mask::$(cat secrets/pip_token.txt)"
-
-      - name: Publication de l'index amd64 + arm64 (Bake, couches reprises du cache validé)
-        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
-        with:
-          source: .
-          files: |
-            docker-bake.hcl
-            ${{ steps.meta.outputs.bake-file-tags }}
-            ${{ steps.meta.outputs.bake-file-labels }}
-          targets: api
-          push: true
-
-      - name: Vérification de l'index multi-architecture publié
+      - name: Publication de l'archive OCI testée (index amd64 + arm64, digests préservés)
         env:
-          REF: ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          REF="${REF,,}"
-          docker buildx imagetools inspect "$REF"
-          PLATFORMS=$(docker buildx imagetools inspect "$REF" --format '{{json .Manifest}}' \
+          for TAG in $TAGS; do
+            skopeo copy --all --preserve-digests "oci-archive:$RUNNER_TEMP/image-oci.tar" "docker://$TAG"
+          done
+
+      - name: Vérification de l'index publié (digest identique à l'image testée)
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          EXPECTED="sha256:$(skopeo inspect --raw "oci-archive:$RUNNER_TEMP/image-oci.tar" | sha256sum | cut -d' ' -f1)"
+          for TAG in $TAGS; do
+            DIGEST="sha256:$(skopeo inspect --raw "docker://$TAG" | sha256sum | cut -d' ' -f1)"
+            echo "$TAG : $DIGEST"
+            [ "$DIGEST" = "$EXPECTED" ] || { echo "::error::$TAG ne correspond pas à l'image testée ($EXPECTED)"; exit 1; }
+          done
+          PLATFORMS=$(skopeo inspect --raw "docker://$(head -n1 <<< "$TAGS")" \
             | jq -r '.manifests[] | select(.platform.os != "unknown") | "\(.platform.os)/\(.platform.architecture)"')
           for P in linux/amd64 linux/arm64; do
             grep -qx "$P" <<< "$PLATFORMS" || { echo "::error::Plateforme $P absente de l'index publié"; exit 1; }
           done
-          echo "Index publié : ${PLATFORMS//$'\n'/, }"
+          echo "Index publié : $EXPECTED (${PLATFORMS//$'\n'/, })"
